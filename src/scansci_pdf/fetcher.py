@@ -174,6 +174,8 @@ class PaperFetcher:
 
     def _challenge_max_tries(self) -> int:
         """Keep a challenged DOI open long enough for a human to act."""
+        if self.config.get("human_interaction_mode") == "defer":
+            return 0
         try:
             seconds = int(self.config.get("challenge_wait_seconds", 900) or 900)
         except (AttributeError, TypeError, ValueError):

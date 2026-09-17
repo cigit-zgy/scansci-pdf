@@ -873,6 +873,22 @@ def _download_impl(
 ) -> dict[str, Any]:
     race_failures: list[dict[str, str]] = []
     config = load_config()
+    from ..project_profiles import ProfilePolicyError, enforce_runtime_options
+
+    try:
+        enforce_runtime_options(
+            config,
+            scihub_enabled=scihub_enabled,
+            use_tor=use_tor,
+            strategy=strategy,
+        )
+    except ProfilePolicyError as exc:
+        return fail(
+            identifier,
+            str(exc),
+            error_type="profile_policy_blocked",
+            action="use the active project profile without grey/Tor overrides",
+        )
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     if scihub_enabled is not None:
@@ -1472,6 +1488,31 @@ def batch_download(
     fallbacks: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     config = load_config()
+    from ..project_profiles import ProfilePolicyError, enforce_runtime_options
+
+    try:
+        enforce_runtime_options(config, scihub_enabled=scihub_enabled, use_tor=use_tor)
+    except ProfilePolicyError as exc:
+        rows = [
+            fail(
+                identifier,
+                str(exc),
+                error_type="profile_policy_blocked",
+                action="use the active project profile without grey/Tor overrides",
+            )
+            for identifier in identifiers
+        ]
+        return {
+            "total": len(identifiers),
+            "unique": len({item.strip().lower() for item in identifiers}),
+            "skipped_duplicates": 0,
+            "skipped_completed": 0,
+            "succeeded": 0,
+            "failed": len(rows),
+            "results": rows,
+            "failed_dois": list(identifiers),
+            "batch_id": batch_id or "",
+        }
     workers = config.get("batch_workers", 5)
 
     # Duplicate detection via DOI normalization

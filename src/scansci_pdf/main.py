@@ -1144,7 +1144,9 @@ def config_show(
     # Use update_config for proper type coercion and validation
     try:
         update_config(key, value)
-        print(f"  Set {key} = {value}")
+        from .config import mask_config_value
+
+        print(f"  Set {key} = {mask_config_value(key, value)}")
     except ValueError as e:
         print(f"  Error: {e}")
 

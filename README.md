@@ -32,6 +32,10 @@
 
 ## 快速开始
 
+`cigit-zgy/paper_download` users should first read
+[`docs/PAPER_DOWNLOAD_PROFILES.md`](docs/PAPER_DOWNLOAD_PROFILES.md). Its named
+profiles fail closed on grey, Tor, proxy-pool, and automated challenge routes.
+
 安装和更新是同一句话——对 Codex、ZCode、Claude Code 都这么说：
 
 ```text

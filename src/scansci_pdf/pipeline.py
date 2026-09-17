@@ -528,7 +528,9 @@ def run_lanes(
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    config = config or {}
+    from .project_profiles import apply_project_profile, deferred_result
+
+    config = apply_project_profile(config or {})
 
     _enrich_oa_urls(entries, config)
 
@@ -577,6 +579,14 @@ def run_lanes(
             ),
         )
         results += _normalize_engine_results(raw)
+
+    if config.get("project_profile") and not grey_allowed(config):
+        legal_fallbacks = list(dict.fromkeys(grey + fast_failures))
+        if config.get("human_interaction_mode") == "defer":
+            results.extend(deferred_result(doi) for doi in legal_fallbacks + inst)
+            inst = []
+        elif allow_institution:
+            inst = list(dict.fromkeys(inst + legal_fallbacks))
 
     if inst and allow_institution:
         from .institutional.config_adapter import ConfigAdapter

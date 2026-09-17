@@ -34,6 +34,7 @@ DEFAULT_SCIHUB_DOMAINS = [
 ]
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    "project_profile": "",
     "email": "scansci-pdf@example.invalid",
     "output_dir": str(DATA_DIR / "papers"),
     "cache_dir": str(DATA_DIR / "cache"),
@@ -138,7 +139,9 @@ def load_config() -> dict[str, Any]:
             pass
     for key, value in DEFAULT_CONFIG.items():
         config.setdefault(key, value)
-    return config
+    from .project_profiles import apply_project_profile
+
+    return apply_project_profile(config)
 
 
 def save_config(config: dict[str, Any]) -> None:
@@ -176,6 +179,18 @@ def update_config(key: str, value: str) -> dict[str, Any]:
             f"Valid keys include: {', '.join(sorted(DEFAULT_CONFIG.keys()))}",
             stacklevel=2,
         )
+
+    if key == "project_profile":
+        from .project_profiles import PROFILE_NAMES
+
+        value = value.strip()
+        if value not in PROFILE_NAMES:
+            raise ValueError(
+                f"Invalid project_profile {value!r}. Valid options: {', '.join(PROFILE_NAMES)}"
+            )
+        config[key] = value
+        save_config(config)
+        return config
 
     # Special handling for download_strategy
     if key == "download_strategy":
