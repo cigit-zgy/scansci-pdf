@@ -25,9 +25,10 @@ manual human-verification flow for a small number of papers. It does not treat a
 personal Elsevier API key as subscription entitlement.
 
 Both profiles force `legal_only`, disable Sci-Hub/LibGen/SciBban lanes, Tor,
-proxy pools, static browser proxies, FlareSolverr, automatic Turnstile handling,
-and supplementary downloads. Explicit per-call grey or Tor requests return
-`profile_policy_blocked` before network work.
+fixed/rotating proxies, browser restarts and multi-browser fingerprint pools,
+FlareSolverr, automatic Turnstile handling, and supplementary downloads.
+Explicit per-call grey or Tor requests return `profile_policy_blocked` before
+network work.
 
 Elsevier credentials remain outside Git. Use the existing local config or the
 `ELSEVIER_API_KEY` environment variable. Never put a key on a command line that
