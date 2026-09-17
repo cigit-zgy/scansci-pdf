@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -187,6 +188,17 @@ def close_shared_browser(config: dict[str, Any] | None = None) -> None:
     _tls.context = None
 
 
+def persistent_profile_dir(config: dict[str, Any] | None = None) -> Path:
+    """Return ScanSci's dedicated publisher profile, never ordinary Chrome."""
+    configured = str((config or {}).get("chrome_profile_dir", "") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    data_dir = Path(
+        os.environ.get("SCANSCI_PDF_DATA_DIR", str(Path.home() / ".scansci-pdf"))
+    )
+    return data_dir / "browser_profiles" / "publisher"
+
+
 def _get_shared_browser(config: dict[str, Any] | None = None):
     """Get or create a browser for the current thread. Returns (browser, context)."""
     browser = getattr(_tls, "browser", None)
@@ -262,9 +274,19 @@ def _get_shared_browser(config: dict[str, Any] | None = None):
         humanize = config.get("browser_humanize", True)
 
     args = _build_browser_args(config)
-    browser = launch(headless=headless, humanize=humanize, args=args, config=config)
+    if sys.platform == "darwin" and backend == BACKEND_PATCHRIGHT and not headless:
+        profile = persistent_profile_dir(config)
+        context = get_persistent_context(profile, config)
+        browser = context.browser
+    else:
+        browser = launch(
+            headless=headless,
+            humanize=humanize,
+            args=args,
+            config=config,
+        )
+        context = browser.new_context()
     _register_browser(browser)
-    context = browser.new_context()
 
     # Launching the sync API leaves its dispatcher event loop "running" in
     # this thread (asyncio.get_running_loop() now succeeds here). Register it

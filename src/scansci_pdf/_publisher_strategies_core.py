@@ -81,8 +81,13 @@ def _restore_cookies_to_context(context: Any, config: dict[str, Any]) -> None:
 
 @contextlib.contextmanager
 def _visible_browser(config: dict[str, Any], publisher: str, *, viewport: dict | None = None):
-    """Open visible stealth browser with persistent profile. Falls back to ephemeral."""
-    from .browser_engine import close_shared_browser, is_available
+    """Open the shared dedicated publisher profile in non-activating mode."""
+    from .browser_engine import (
+        close_shared_browser,
+        get_persistent_context,
+        is_available,
+        persistent_profile_dir,
+    )
 
     # Any resolved backend works (camoufox included); the old _HAS_CLOAKBROWSER
     # gate wrongly required the cloakbrowser package.
@@ -93,36 +98,16 @@ def _visible_browser(config: dict[str, Any], publisher: str, *, viewport: dict |
     # (visible) launch on the same thread dies with "Sync API inside the
     # asyncio loop". Tear it down first; it relaunches lazily when needed.
     close_shared_browser(config)
-    profile_dir = _get_profile_dir(config, publisher)
-    browser = None
-
-    try:
-        ctx = launch_persistent_context(
-            str(profile_dir),
-            headless=False, humanize=True,
-            args=["--disable-features=CrossOriginOpenerPolicy"],
-        )
-        page = ctx.new_page()
-        log.info(f"   [{publisher}] persistent browser profile: {profile_dir}")
-        # Ensure cookies are loaded from saved file
-        _restore_cookies_to_context(ctx, config)
-    except Exception as _e:
-        log.info(f"   [{publisher}] persistent context unavailable ({_e}), using ephemeral")
-        _vp = viewport or {"width": 1440, "height": 900}
-        browser = launch(headless=False, humanize=True,
-                         args=["--disable-features=CrossOriginOpenerPolicy"])
-        ctx = browser.new_context(viewport=_vp)
-        _restore_cookies_to_context(ctx, config)
-        page = ctx.new_page()
+    profile_dir = persistent_profile_dir(config)
+    ctx = get_persistent_context(profile_dir, config)
+    page = ctx.new_page()
+    log.info(f"   [{publisher}] persistent browser profile: {profile_dir}")
 
     try:
         yield ctx, page
     finally:
         try:
-            if browser:
-                browser.close()
-            else:
-                ctx.close()
+            ctx.close()
         except Exception:
             pass
 
@@ -1236,6 +1221,18 @@ def _is_elsevier_pdf_security(html: str) -> bool:
     )
 
 
+def _elsevier_entitlement_state(html: str, *, pdf_pages: int = 0) -> str:
+    """Classify functional Elsevier access without trusting login or HTTP 200."""
+    if pdf_pages > 1:
+        return "subscribed_full_text"
+    if pdf_pages == 1:
+        return "preview_only"
+    lower = html.lower()
+    if "does not subscribe to this content on sciencedirect" in lower:
+        return "institution_not_subscribed"
+    return "unproven"
+
+
 # ============================================================
 # AIP/AVS loading page detection
 # ============================================================
@@ -1746,6 +1743,17 @@ def _browser_download(
                 log.info(f"   [{publisher}] challenge did not resolve")
                 _set_error("cloudflare_blocked", "use_proxy_or_browser")
                 return False
+
+        if (
+            publisher == "Elsevier"
+            and _elsevier_entitlement_state(html) == "institution_not_subscribed"
+        ):
+            log.info(
+                "   [Elsevier] publisher recognizes the institution but reports "
+                "no subscription for this content"
+            )
+            _set_error("institution_entitlement_unavailable", "no_subscription")
+            return False
 
         # Check for paywall AFTER challenge resolution
         if _detect_paywall(html):

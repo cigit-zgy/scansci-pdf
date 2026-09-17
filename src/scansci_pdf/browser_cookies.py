@@ -109,7 +109,6 @@ def extract_via_browser(
         Result dict with success, cookies_count, domains, etc.
     """
     try:
-        from .browser_backend import launch
         from .browser_backend import is_available as _browser_backend_available
         if not _browser_backend_available():
             return {
@@ -135,8 +134,9 @@ def extract_via_browser(
     print(f"  登录完成后关闭浏览器窗口即可\n")
 
     try:
-        browser = launch(headless=False, humanize=True)
-        context = browser.new_context(viewport={"width": 1440, "height": 900})
+        from .browser_engine import get_persistent_context, persistent_profile_dir
+
+        context = get_persistent_context(persistent_profile_dir(config), config)
         page = context.new_page()
 
         try:
@@ -170,7 +170,7 @@ def extract_via_browser(
         all_cookies = context.cookies()
 
         if not all_cookies:
-            browser.close()
+            context.close()
             return {
                 "success": False,
                 "message": "未捕获到 cookies。请确保已登录机构账号。",
@@ -184,16 +184,11 @@ def extract_via_browser(
         _save_cookies_json(save_cookies, cookie_file)
         _save_cookies_netscape(save_cookies, netscape_file)
 
-        # Import into CloakBrowser server if running
+        # The persistent profile is the acquisition owner. Future downloads
+        # reopen the same profile; no cookie transfer to another context is
+        # needed for session reuse.
         browser_imported = 0
-        try:
-            from .browser_engine import import_cookies, is_available
-            if is_available(config):
-                browser_imported = import_cookies(netscape_file, config)
-        except Exception:
-            pass
-
-        browser.close()
+        context.close()
 
         domains_found = list({c.get("domain", "").lstrip(".") for c in save_cookies})[:10]
         return {
@@ -204,6 +199,7 @@ def extract_via_browser(
             "netscape_file": str(netscape_file),
             "domains": domains_found,
             "browser_imported": browser_imported,
+            "persistent_profile_reused": True,
             "message": f"捕获 {len(all_cookies)} 个 cookies，其中 {len(publisher_cookies)} 个属于出版社。"
                        f"已保存，后续下载自动使用。",
         }

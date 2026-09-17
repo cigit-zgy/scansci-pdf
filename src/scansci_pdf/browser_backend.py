@@ -21,7 +21,10 @@ import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -267,6 +270,202 @@ def _clean_patchright_ua(browser: Any, headless: bool) -> str | None:
         return None
 
 
+def _chrome_executable() -> Path:
+    """Return the installed macOS Chrome binary used by the background owner."""
+    if sys.platform != "darwin":
+        raise RuntimeError("background Chrome owner requires macOS")
+    for applications in (Path("/Applications"), Path.home() / "Applications"):
+        executable = applications / "Google Chrome.app/Contents/MacOS/Google Chrome"
+        if executable.is_file() and os.access(executable, os.X_OK):
+            return executable
+    raise RuntimeError("installed Google Chrome executable not found")
+
+
+def _validate_dedicated_profile(profile: str | Path) -> Path:
+    """Resolve a task profile and reject the ordinary User Chrome profile."""
+    candidate = Path(profile).expanduser()
+    if not candidate.is_absolute():
+        raise RuntimeError("dedicated Chrome profile path must be absolute")
+    candidate = candidate.resolve()
+    ordinary = (Path.home() / "Library/Application Support/Google/Chrome").resolve()
+    if (
+        candidate == ordinary
+        or candidate.is_relative_to(ordinary)
+        or ordinary.is_relative_to(candidate)
+    ):
+        raise RuntimeError("ordinary Chrome profile is forbidden")
+    return candidate
+
+
+def _require_profile_free(profile: Path) -> None:
+    """Fail closed when another Chrome process owns the dedicated profile."""
+    for name in ("SingletonLock", "SingletonSocket"):
+        try:
+            (profile / name).lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            raise RuntimeError("unable to verify dedicated Chrome profile ownership") from None
+        raise RuntimeError("dedicated Chrome profile is already in use")
+
+
+def _background_chrome_command(
+    profile: Path, debugging_port: int, args: list[str] | None = None
+) -> list[str]:
+    """Build the non-activating native Chrome command used for automation."""
+    profile = _validate_dedicated_profile(profile)
+    if not 1 <= debugging_port <= 65535:
+        raise RuntimeError("invalid local debugging port")
+    executable = _chrome_executable()
+    return [
+        "/usr/bin/open",
+        "-g",
+        "-n",
+        "-W",
+        "-a",
+        str(executable.parents[2]),
+        "--stdin",
+        "/dev/null",
+        "--stdout",
+        "/dev/null",
+        "--stderr",
+        "/dev/null",
+        "--args",
+        f"--user-data-dir={profile}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--no-startup-window",
+        "--remote-debugging-address=127.0.0.1",
+        f"--remote-debugging-port={debugging_port}",
+        *(args or []),
+    ]
+
+
+class _BackgroundPersistentContext:
+    """Own a non-activating Chrome process and its persistent default context."""
+
+    def __init__(
+        self,
+        *,
+        browser: Any,
+        context: Any,
+        session: Any,
+        process: Any,
+        profile: Path,
+        playwright: Any,
+    ) -> None:
+        self._browser = browser
+        self._context = context
+        self._session = session
+        self._process = process
+        self._profile = profile
+        self._playwright = playwright
+        self._closed = False
+
+    @property
+    def browser(self) -> _BackgroundPersistentContext:
+        return self
+
+    def is_connected(self) -> bool:
+        return bool(self._browser.is_connected()) and not self._closed
+
+    def new_page(self) -> Any:
+        # Playwright context.new_page() creates a foreground target on macOS.
+        with self._context.expect_page(timeout=15_000) as created:
+            self._session.send(
+                "Target.createTarget", {"url": "about:blank", "background": True}
+            )
+        return created.value
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._session.send("Browser.close")
+        except Exception as exc:
+            logger.debug("background Chrome close command failed: %s", exc)
+        try:
+            self._process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("dedicated Chrome did not exit cleanly") from None
+        finally:
+            try:
+                self._playwright.stop()
+            except Exception as exc:
+                logger.debug("background Chrome driver cleanup failed: %s", exc)
+        _require_profile_free(self._profile)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._context, name)
+
+
+def _launch_patchright_background_persistent(
+    config: dict[str, Any] | None,
+    user_data_dir: str,
+    args: list[str] | None,
+) -> _BackgroundPersistentContext:
+    """Launch headed Chrome non-activating and attach over loopback-only CDP."""
+    from patchright.sync_api import sync_playwright
+
+    profile = _validate_dedicated_profile(user_data_dir)
+    profile.mkdir(parents=True, exist_ok=True)
+    _require_profile_free(profile)
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+
+    process = subprocess.Popen(  # noqa: S603 -- fixed native launcher and validated args
+        _background_chrome_command(profile, port, args),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 15
+    while process.poll() is None and time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                break
+        except OSError:
+            time.sleep(0.1)
+    else:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        raise RuntimeError("background Chrome listener unavailable")
+
+    playwright = sync_playwright().start()
+    try:
+        browser = playwright.chromium.connect_over_cdp(
+            f"http://127.0.0.1:{port}", timeout=15_000
+        )
+        context = browser.contexts[0]
+        session = browser.new_browser_cdp_session()
+    except Exception:
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        finally:
+            playwright.stop()
+        raise
+    return _BackgroundPersistentContext(
+        browser=browser,
+        context=context,
+        session=session,
+        process=process,
+        profile=profile,
+        playwright=playwright,
+    )
+
+
 def _launch_patchright(
     config: dict[str, Any] | None,
     headless: bool,
@@ -344,6 +543,19 @@ def _launch_patchright_persistent(
     **kwargs: Any,
 ) -> Any:
     """Persistent context via patchright, with the same binary fallbacks."""
+    if sys.platform == "darwin" and not headless:
+        if kwargs:
+            unsupported = ", ".join(sorted(kwargs))
+            raise RuntimeError(
+                f"background persistent Chrome does not support context options: {unsupported}"
+            )
+        background_args = list(args or [])
+        if proxy and isinstance(proxy, dict) and proxy.get("server"):
+            background_args.append(f"--proxy-server={proxy['server']}")
+        return _launch_patchright_background_persistent(
+            config, user_data_dir, background_args
+        )
+
     from patchright.sync_api import sync_playwright
 
     browser_kwargs = _patchright_browser_kwargs(config)
