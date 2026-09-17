@@ -513,6 +513,37 @@ def grey_allowed(config: dict[str, Any] | None) -> bool:
     return cfg.get("download_strategy", "fastest") != "legal_only"
 
 
+def _run_legal_profile_lane(
+    dois: list[str],
+    output_dir: Path,
+    config: dict[str, Any],
+    *,
+    workers: int,
+) -> list[dict[str, Any]]:
+    """Run the complete legal resolver without browser or institutional work."""
+    from .sources import download
+
+    def resolve(doi: str) -> dict[str, Any]:
+        try:
+            result = download(
+                doi,
+                output_dir,
+                scihub_enabled=False,
+                rename=False,
+                _institutional=False,
+                _machine_only=True,
+                _config_override=config,
+                strategy="legal_only",
+            )
+        except Exception as exc:
+            result = {"success": False, "error": str(exc), "source": "none"}
+        result.setdefault("doi", doi)
+        return result
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+        return list(executor.map(resolve, dois))
+
+
 def run_lanes(
     entries: list[QueueEntry],
     output_dir: str | Path,
@@ -560,8 +591,11 @@ def run_lanes(
 
     if fast:
         lane_results = _run_fast_lane(fast, out, config, workers=workers_fast, progress=_progress)
-        results += lane_results
         fast_failures = [r["doi"] for r in lane_results if not r.get("success")]
+        if config.get("project_profile") == "institution_bulk":
+            results.extend(r for r in lane_results if r.get("success"))
+        else:
+            results += lane_results
 
     grey_ids = grey + fast_failures if allow_grey else list(grey)
     # Lane scheduling must not widen source authorization: if the user has
@@ -583,7 +617,22 @@ def run_lanes(
     if config.get("project_profile") and not grey_allowed(config):
         legal_fallbacks = list(dict.fromkeys(grey + fast_failures))
         if config.get("human_interaction_mode") == "defer":
-            results.extend(deferred_result(doi) for doi in legal_fallbacks + inst)
+            legal_candidates = list(dict.fromkeys(legal_fallbacks + inst))
+            legal_results = _run_legal_profile_lane(
+                legal_candidates,
+                out,
+                config,
+                workers=workers_fast,
+            )
+            for row in legal_results:
+                if row.get("success"):
+                    results.append(row)
+                    continue
+                deferred = deferred_result(str(row.get("doi") or ""))
+                deferred["automatic_error"] = str(
+                    row.get("error") or row.get("reason") or "no legal PDF"
+                )
+                results.append(deferred)
             inst = []
         elif allow_institution:
             inst = list(dict.fromkeys(inst + legal_fallbacks))

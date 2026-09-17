@@ -112,6 +112,74 @@ def test_institution_bulk_finishes_automatic_work_and_defers_human_lane(monkeypa
     assert phases.deferred[0]["reason"] == "human_attention_required"
 
 
+def test_institution_bulk_retries_complete_legal_lane_without_duplicate_rows(monkeypatch, tmp_path):
+    entries = [
+        pipeline.QueueEntry("10.1000/api", channel="elsevier"),
+        pipeline.QueueEntry("10.1000/repository", channel="auto"),
+    ]
+    monkeypatch.setattr(
+        pipeline,
+        "_run_fast_lane",
+        lambda *_args, **_kwargs: [
+            {"doi": "10.1000/api", "success": False, "error": "fast lane failed"}
+        ],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_run_legal_profile_lane",
+        lambda dois, *_args, **_kwargs: [
+            {
+                "doi": doi,
+                "success": doi.endswith("repository"),
+                "source": "openalex" if doi.endswith("repository") else "none",
+                "error": "no legal PDF" if doi.endswith("api") else "",
+            }
+            for doi in dois
+        ],
+    )
+    monkeypatch.setattr(pipeline, "_enrich_oa_urls", lambda *_: None)
+    monkeypatch.setattr(pipeline, "_transient_retry", lambda *_: None)
+    monkeypatch.setattr(pipeline, "_fetch_si_for_results", lambda *_: None)
+
+    results = pipeline.run_lanes(
+        entries,
+        tmp_path,
+        config={"project_profile": "institution_bulk"},
+    )
+
+    assert len(results) == len(entries)
+    assert len({row["doi"] for row in results}) == len(entries)
+    by_doi = {row["doi"]: row for row in results}
+    assert by_doi["10.1000/repository"]["success"] is True
+    assert by_doi["10.1000/api"]["status"] == "deferred"
+    assert by_doi["10.1000/api"]["automatic_error"] == "no legal PDF"
+
+
+def test_legal_profile_lane_is_machine_only(monkeypatch, tmp_path):
+    from scansci_pdf import sources
+
+    calls = []
+
+    def fake_download(doi, output_dir, **kwargs):
+        calls.append((doi, output_dir, kwargs))
+        return {"doi": doi, "success": False, "error": "fixture"}
+
+    monkeypatch.setattr(sources, "download", fake_download)
+
+    results = pipeline._run_legal_profile_lane(
+        ["10.1000/fixture"],
+        tmp_path,
+        {"project_profile": "institution_bulk"},
+        workers=1,
+    )
+
+    assert results[0]["doi"] == "10.1000/fixture"
+    assert calls[0][2]["_machine_only"] is True
+    assert calls[0][2]["_institutional"] is False
+    assert calls[0][2]["scihub_enabled"] is False
+    assert calls[0][2]["strategy"] == "legal_only"
+
+
 def test_home_personal_is_sequential_and_keeps_manual_human_mode():
     cfg = apply_project_profile({"batch_workers": 12, "max_browser_workers": 5}, "home_personal")
     assert cfg["batch_workers"] == 1

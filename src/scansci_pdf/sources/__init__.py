@@ -826,6 +826,8 @@ def download(
     bibtex: bool = False,
     rename: bool = True,
     _institutional: bool = True,
+    _machine_only: bool = False,
+    _config_override: dict[str, Any] | None = None,
     strategy: str | None = None,
 ) -> dict[str, Any]:
     key = identifier.strip()
@@ -852,6 +854,8 @@ def download(
             bibtex=bibtex,
             rename=rename,
             _institutional=_institutional,
+            _machine_only=_machine_only,
+            _config_override=_config_override,
             strategy=strategy,
         )
     finally:
@@ -869,11 +873,22 @@ def _download_impl(
     bibtex: bool = False,
     rename: bool = True,
     _institutional: bool = True,
+    _machine_only: bool = False,
+    _config_override: dict[str, Any] | None = None,
     strategy: str | None = None,
 ) -> dict[str, Any]:
     race_failures: list[dict[str, str]] = []
-    config = load_config()
-    from ..project_profiles import ProfilePolicyError, enforce_runtime_options
+    from ..project_profiles import (
+        ProfilePolicyError,
+        apply_project_profile,
+        enforce_runtime_options,
+    )
+
+    config = (
+        apply_project_profile(dict(_config_override))
+        if _config_override is not None
+        else load_config()
+    )
 
     try:
         enforce_runtime_options(
@@ -1005,6 +1020,10 @@ def _download_impl(
 
     # Phase 1: Free sources (OA + grey) — parallel race
     free_sources = _build_free_sources(doi, config)
+    if _machine_only:
+        free_sources = [
+            (source, label) for source, label in free_sources if label not in _BROWSER_SOURCE_LABELS
+        ]
     if free_sources:
         result = _run_tiers_parallel(
             [(free_sources, "Free", 15)], doi, target_dir, output_path, config, use_tor, 15,
